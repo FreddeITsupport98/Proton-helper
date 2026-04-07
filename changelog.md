@@ -4,3 +4,22 @@
 - 2026-04-07 20:17 UTC: Added self auto-chmod logic in `setupPVPN.sh` to keep the setup script executable.
 - 2026-04-07 20:19 UTC: Added a menu-driven installer flow in `setupPVPN.sh` to select install or uninstall before execution.
 - 2026-04-07 20:22 UTC: Added repair menu action and created `tests/regression` safeguard scripts (`syntax-master.sh`, `test-setupPVPN.sh`, and `run-regressions.sh`).
+- 2026-04-07 20:31 UTC: Added APT repository bootstrap fallback via official Proton `.deb`, added network-readiness polling before autoconnect, and improved colored INFO/WARN/ERROR output helpers.
+- 2026-04-07 20:33 UTC: Added non-interactive mode (`--non-interactive`) to run install/repair/uninstall flows without opening the menu UI.
+- 2026-04-07 20:35 UTC: Added dry-run mode (`--dry-run`) to simulate setup and uninstall operations without applying changes.
+- 2026-04-07 20:37 UTC: Added `--yes` option to auto-confirm uninstall package removal in non-interactive automation flows.
+- 2026-04-07 20:38 UTC: Added explicit uninstall CI summary reporting (`would uninstall packages: yes/no` in dry-run and `uninstall packages: yes/no` in normal runs).
+- 2026-04-07 20:39 UTC: Added machine-parseable uninstall decision output lines (`CI_JSON`) for normal and dry-run uninstall CI log parsing.
+- 2026-04-07 20:41 UTC: Added consolidated uninstall `CI_JSON` output containing action and runtime flags (`dry_run`, `non_interactive`, `assume_yes`) plus uninstall package decision.
+- 2026-04-07 20:42 UTC: Upgraded generated `systemd --user` unit to include Documentation, PATH environment, ExecStop disconnect, TimeoutStartSec, and explicit journald output/error directives.
+- 2026-04-07 20:45 UTC: Added conservative restart directives (`Restart=on-failure`, `RestartSec=10`) to generated systemd user unit.
+- 2026-04-07 20:50 UTC: Added kill-switch uninstall safety handling (detect + disable path) and expanded consolidated uninstall `CI_JSON` telemetry with `kill_switch_was_enabled` and `kill_switch_disabled_for_uninstall`.
+- 2026-04-07 20:53 UTC: Added `--force-disable-kill-switch` flag to control kill-switch disable behavior independently from package uninstall auto-confirm (`--yes`), and expanded consolidated telemetry schema.
+- 2026-04-07 20:55 UTC: Added sanity preflight checks, idempotent managed file reconciliation, and safe uninstall path protection that never removes the setup script file.
+- 2026-04-07 21:01 UTC: Added global `EXIT` telemetry trap that always emits a consolidated `CI_JSON` line with action, success, runtime flags, and uninstall/purge decision state.
+- 2026-04-07 21:01 UTC: Added optional uninstall purge flow for ProtonVPN user data (`~/.config/protonvpn`, `~/.cache/protonvpn`, `~/.local/share/protonvpn`) with `--yes` automation and non-interactive safe defaults.
+- 2026-04-07 21:01 UTC: Improved wrapper network readiness checks with default-route fallback (`ip route show default`) to better handle captive-portal or ICMP-restricted networks.
+- 2026-04-07 21:07 UTC: Added autoconnect profile selection (`--connect-mode default|fastest|country`) with optional `--country-code <CC>`, validation/normalization, wrapper connect branching, and connect fields in global exit telemetry.
+- 2026-04-07 21:09 UTC: Added autoconnect retry controls (`--connect-retry`, `--connect-retry-delay`) with numeric validation, wrapper retry loop messaging/backoff, and retry fields in global exit telemetry.
+- 2026-04-07 21:15 UTC: Added dedicated command sanity-check mode (`--sanity-check` / `--non-interactive sanity-check`) and wired command sanity validation into install flow before provisioning/autostart changes.
+- 2026-04-07 21:18 UTC: Added unified status dashboard action (`status`) with non-interactive `STATUS_JSON`, persistent timestamped logging to `~/.local/state/proton-helper.log`, and split tunneling exclusion flags (`--exclude-ip`, `--exclude-cidr`) with validation plus wrapper apply attempts.
