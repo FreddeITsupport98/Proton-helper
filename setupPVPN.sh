@@ -800,16 +800,16 @@ fi
 printf 'Waiting for network connectivity...\n'
 network_up=0
 i=0
-while [ "$i" -lt 15 ]; do
+while [ "\$i" -lt 15 ]; do
     if ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1 || ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1 || ip route show default 2>/dev/null | grep -q '^default '; then
         network_up=1
         break
     fi
     sleep 2
-    i=$((i + 1))
+    i=\$((i + 1))
 done
 
-if [ "$network_up" -eq 0 ]; then
+if [ "\$network_up" -eq 0 ]; then
     printf 'Network not available yet. Aborting ProtonVPN autoconnect.\n' >&2
     exit 1
 fi

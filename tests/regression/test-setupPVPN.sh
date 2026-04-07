@@ -168,6 +168,7 @@ else
     assert_contains 'connect_once() { protonvpn connect --fastest; }' "wrapper fastest connect mode missing"
     assert_contains "protonvpn connect --cc \"\\\$CONNECT_COUNTRY\"" "wrapper country connect mode missing"
     assert_contains 'Unknown CONNECT_MODE: %s' "wrapper unknown mode fallback warning missing"
+    assert_contains "while [ \"\\\$i\" -lt 15 ]; do" "wrapper network loop variable escaping missing"
     assert_contains "while [ \"\\\$attempt\" -le \"\\\$CONNECT_RETRY_COUNT\" ]; do" "wrapper retry loop missing"
     assert_contains 'ProtonVPN connect attempt %s/%s failed; retrying in %ss.' "wrapper retry attempt message missing"
     assert_contains "sleep \"\\\$CONNECT_RETRY_DELAY\"" "wrapper retry delay sleep missing"

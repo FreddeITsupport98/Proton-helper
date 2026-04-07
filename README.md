@@ -43,6 +43,7 @@ The goal is to install ProtonVPN CLI (when needed) and configure login autostart
 - 2026-04-07 21:18 UTC: Added status dashboard action (`status`) with non-interactive `STATUS_JSON` output for service/vpn/kill-switch observability.
 - 2026-04-07 21:18 UTC: Added persistent timestamped logging to `~/.local/state/proton-helper.log` for INFO/WARN/ERROR messages.
 - 2026-04-07 21:18 UTC: Added split tunneling exclude options (`--exclude-ip`, `--exclude-cidr`) with validation and wrapper-side apply attempts.
+- 2026-04-07 21:24 UTC: Fixed wrapper generation under `set -u` by escaping runtime loop variables in heredoc content (prevents `$i`/`$network_up` expansion errors during install).
 
 ## What setupPVPN.sh does
 - Detects supported package managers and installs ProtonVPN CLI when missing.

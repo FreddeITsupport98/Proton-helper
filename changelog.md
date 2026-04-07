@@ -23,3 +23,4 @@
 - 2026-04-07 21:09 UTC: Added autoconnect retry controls (`--connect-retry`, `--connect-retry-delay`) with numeric validation, wrapper retry loop messaging/backoff, and retry fields in global exit telemetry.
 - 2026-04-07 21:15 UTC: Added dedicated command sanity-check mode (`--sanity-check` / `--non-interactive sanity-check`) and wired command sanity validation into install flow before provisioning/autostart changes.
 - 2026-04-07 21:18 UTC: Added unified status dashboard action (`status`) with non-interactive `STATUS_JSON`, persistent timestamped logging to `~/.local/state/proton-helper.log`, and split tunneling exclusion flags (`--exclude-ip`, `--exclude-cidr`) with validation plus wrapper apply attempts.
+- 2026-04-07 21:24 UTC: Fixed `set -u` wrapper generation issue by escaping runtime heredoc loop variables (e.g., `$i`, `$network_up`) so install flow no longer errors while writing the autoconnect wrapper.
