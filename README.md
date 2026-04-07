@@ -44,6 +44,8 @@ The goal is to install ProtonVPN CLI (when needed) and configure login autostart
 - 2026-04-07 21:18 UTC: Added persistent timestamped logging to `~/.local/state/proton-helper.log` for INFO/WARN/ERROR messages.
 - 2026-04-07 21:18 UTC: Added split tunneling exclude options (`--exclude-ip`, `--exclude-cidr`) with validation and wrapper-side apply attempts.
 - 2026-04-07 21:24 UTC: Fixed wrapper generation under `set -u` by escaping runtime loop variables in heredoc content (prevents `$i`/`$network_up` expansion errors during install).
+- 2026-04-07 21:29 UTC: Improved human readability by defaulting interactive runs to plain-text summaries, while keeping machine-readable telemetry for non-interactive runs and optional `--ci-json` forcing.
+- 2026-04-07 21:32 UTC: Added ProtonVPN sign-in state detection so install flow only shows `protonvpn signin` guidance when authentication is not detected.
 
 ## What setupPVPN.sh does
 - Detects supported package managers and installs ProtonVPN CLI when missing.
@@ -60,6 +62,7 @@ The goal is to install ProtonVPN CLI (when needed) and configure login autostart
 - Supports explicit command sanity-check mode: `--sanity-check` (or `--non-interactive sanity-check`).
 - Supports status dashboard action: `--non-interactive status` (or `--status`).
 - Supports split tunneling exclusions: `--exclude-ip <IPv4>` and `--exclude-cidr <CIDR>`.
+- Supports optional forced machine telemetry in interactive mode: `--ci-json`.
 - Prints explicit CI summary lines for uninstall package decision (`yes`/`no`), including dry-run reporting.
 - Prints machine-parseable `CI_JSON` lines for uninstall decision output.
 - Prints a consolidated `CI_JSON` line with runtime flags and uninstall decision for strict CI parsing.
@@ -67,6 +70,7 @@ The goal is to install ProtonVPN CLI (when needed) and configure login autostart
 - Global exit `CI_JSON` now also includes `connect_mode` and `connect_country`.
 - Global exit `CI_JSON` also includes `connect_retry_count` and `connect_retry_delay`.
 - Global exit `CI_JSON` includes `split_tunnel_exclude_ips` and `split_tunnel_exclude_cidrs`.
+- By default, `CI_JSON` is emitted for non-interactive runs; interactive runs show readable summaries unless `--ci-json` is used.
 - Uninstall flow now checks ProtonVPN kill switch status and can disable it first to avoid connectivity lockouts.
 - Uninstall flow can optionally purge ProtonVPN user config/cache/share data and respects non-interactive safe defaults.
 - Performs preflight sanity checks for required core utilities.
@@ -85,6 +89,7 @@ The goal is to install ProtonVPN CLI (when needed) and configure login autostart
 - Keeps setup behavior focused on default `protonvpn connect` (no country/city flags).
 - Uninstall mode removes startup files and can also remove ProtonVPN CLI packages.
 - Uninstall safety guard explicitly refuses to remove the setup script itself.
+- Install flow now suppresses redundant signin prompts when ProtonVPN CLI already appears authenticated.
 
 ## Regression Safeguards
 - `tests/regression/syntax-master.sh`: Base syntax/lint script for all shell scripts, with auto-chmod scanning.
@@ -118,6 +123,8 @@ Run status dashboard in non-interactive JSON mode:
 `./setupPVPN.sh --non-interactive status`
 Run install with split tunnel exclusions:
 `./setupPVPN.sh --non-interactive install --exclude-ip 192.168.1.10 --exclude-cidr 10.0.0.0/24`
+Run install interactively but still force machine telemetry output:
+`./setupPVPN.sh --ci-json`
 Expected CI parse lines include:
 `CI_JSON: {"would_uninstall_packages":"yes"}` (dry-run) or `CI_JSON: {"uninstall_packages":"yes"}` (normal run)
 Consolidated parse line:

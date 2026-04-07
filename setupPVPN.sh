@@ -34,6 +34,7 @@ SPLIT_TUNNEL_EXCLUDE_IPS=""
 SPLIT_TUNNEL_EXCLUDE_CIDRS=""
 SANITY_ONLY=0
 NON_INTERACTIVE=0
+FORCE_CI_JSON=0
 DRY_RUN=0
 ASSUME_YES=0
 FORCE_DISABLE_KILL_SWITCH=0
@@ -86,6 +87,12 @@ json_bool() {
         printf 'false'
     fi
 }
+should_emit_ci_json() {
+    if [ "$NON_INTERACTIVE" -eq 1 ] || [ "$FORCE_CI_JSON" -eq 1 ]; then
+        return 0
+    fi
+    return 1
+}
 exit_handler() {
     DRY_RUN_JSON="$(json_bool "$DRY_RUN")"
     NON_INTERACTIVE_JSON="$(json_bool "$NON_INTERACTIVE")"
@@ -95,10 +102,16 @@ exit_handler() {
     KILL_SWITCH_DISABLED_JSON="$(json_bool "$KILL_SWITCH_DISABLED_FOR_UNINSTALL")"
     if [ "$SCRIPT_RESULT" -eq 0 ]; then
         SUCCESS_JSON='true'
+        SUCCESS_WORD='success'
     else
         SUCCESS_JSON='false'
+        SUCCESS_WORD='failed'
     fi
-    printf 'CI_JSON: {"action":"%s","success":%s,"dry_run":%s,"non_interactive":%s,"assume_yes":%s,"force_disable_kill_switch":%s,"connect_mode":"%s","connect_country":"%s","connect_retry_count":"%s","connect_retry_delay":"%s","split_tunnel_exclude_ips":"%s","split_tunnel_exclude_cidrs":"%s","uninstall_packages_decision":"%s","purge_config_decision":"%s","kill_switch_was_enabled":%s,"kill_switch_disabled_for_uninstall":%s}\n' "$ACTION" "$SUCCESS_JSON" "$DRY_RUN_JSON" "$NON_INTERACTIVE_JSON" "$ASSUME_YES_JSON" "$FORCE_DISABLE_KILL_SWITCH_JSON" "$CONNECT_MODE" "$CONNECT_COUNTRY" "$CONNECT_RETRY_COUNT" "$CONNECT_RETRY_DELAY" "$SPLIT_TUNNEL_EXCLUDE_IPS" "$SPLIT_TUNNEL_EXCLUDE_CIDRS" "$UNINSTALL_PACKAGES_DECISION" "$PURGE_CONFIG_DECISION" "$KILL_SWITCH_WAS_ENABLED_JSON" "$KILL_SWITCH_DISABLED_JSON"
+    if should_emit_ci_json; then
+        printf 'CI_JSON: {"action":"%s","success":%s,"dry_run":%s,"non_interactive":%s,"assume_yes":%s,"force_disable_kill_switch":%s,"connect_mode":"%s","connect_country":"%s","connect_retry_count":"%s","connect_retry_delay":"%s","split_tunnel_exclude_ips":"%s","split_tunnel_exclude_cidrs":"%s","uninstall_packages_decision":"%s","purge_config_decision":"%s","kill_switch_was_enabled":%s,"kill_switch_disabled_for_uninstall":%s}\n' "$ACTION" "$SUCCESS_JSON" "$DRY_RUN_JSON" "$NON_INTERACTIVE_JSON" "$ASSUME_YES_JSON" "$FORCE_DISABLE_KILL_SWITCH_JSON" "$CONNECT_MODE" "$CONNECT_COUNTRY" "$CONNECT_RETRY_COUNT" "$CONNECT_RETRY_DELAY" "$SPLIT_TUNNEL_EXCLUDE_IPS" "$SPLIT_TUNNEL_EXCLUDE_CIDRS" "$UNINSTALL_PACKAGES_DECISION" "$PURGE_CONFIG_DECISION" "$KILL_SWITCH_WAS_ENABLED_JSON" "$KILL_SWITCH_DISABLED_JSON"
+    else
+        printf 'Run summary: action=%s result=%s mode=%s\n' "$ACTION" "$SUCCESS_WORD" "interactive"
+    fi
 }
 
 trap exit_handler EXIT
@@ -495,7 +508,7 @@ run_status_flow() {
 }
 
 print_usage() {
-    printf 'Usage: %s [--non-interactive <install|repair|status|uninstall|quit|sanity-check>] [--status] [--sanity-check] [--connect-mode <default|fastest|country>] [--country-code <CC>] [--connect-retry <N>] [--connect-retry-delay <seconds>] [--exclude-ip <IPv4>] [--exclude-cidr <CIDR>] [--dry-run] [--yes] [--force-disable-kill-switch] [--help]\n' "$SCRIPT_PATH"
+    printf 'Usage: %s [--non-interactive <install|repair|status|uninstall|quit|sanity-check>] [--status] [--sanity-check] [--ci-json] [--connect-mode <default|fastest|country>] [--country-code <CC>] [--connect-retry <N>] [--connect-retry-delay <seconds>] [--exclude-ip <IPv4>] [--exclude-cidr <CIDR>] [--dry-run] [--yes] [--force-disable-kill-switch] [--help]\n' "$SCRIPT_PATH"
 }
 
 parse_cli_args() {
@@ -534,6 +547,9 @@ parse_cli_args() {
                 ;;
             --force-disable-kill-switch)
                 FORCE_DISABLE_KILL_SWITCH=1
+                ;;
+            --ci-json)
+                FORCE_CI_JSON=1
                 ;;
             --sanity-check)
                 SANITY_ONLY=1
@@ -749,6 +765,39 @@ install_protonvpn_cli() {
     fi
 
     return 0
+}
+is_protonvpn_signed_in() {
+    if ! have_cmd protonvpn; then
+        return 1
+    fi
+
+    account_output="$(protonvpn account 2>/dev/null || true)"
+    if [ -n "$account_output" ]; then
+        if printf '%s\n' "$account_output" | grep -Eiq '(not logged in|log in|sign in|signin|authenticate)'; then
+            return 1
+        fi
+        if printf '%s\n' "$account_output" | grep -Eiq '(username|plan|subscription|mail|free|plus|visionary)'; then
+            return 0
+        fi
+    fi
+
+    info_output="$(protonvpn info 2>/dev/null || true)"
+    if [ -n "$info_output" ]; then
+        if printf '%s\n' "$info_output" | grep -Eiq '(not logged in|log in|sign in|signin|authenticate)'; then
+            return 1
+        fi
+        return 0
+    fi
+
+    status_output="$(protonvpn status 2>/dev/null || true)"
+    if [ -n "$status_output" ]; then
+        if printf '%s\n' "$status_output" | grep -Eiq '(not logged in|log in|sign in|signin|authenticate)'; then
+            return 1
+        fi
+        return 0
+    fi
+
+    return 1
 }
 
 uninstall_protonvpn_cli() {
@@ -1142,7 +1191,11 @@ run_install_flow() {
     fi
 
     log "ProtonVPN startup setup completed."
-    printf 'If this is your first time, run: protonvpn signin\n'
+    if is_protonvpn_signed_in; then
+        log "ProtonVPN CLI sign-in detected; skipping signin reminder."
+    else
+        printf 'If this is your first time, run: protonvpn signin\n'
+    fi
     if [ "$STARTUP_MODE" = "systemd" ]; then
         printf 'Check status with: systemctl --user --no-pager status protonvpn-autoconnect.service\n'
     fi
@@ -1173,16 +1226,26 @@ run_uninstall_flow() {
     else
         log "Kept ProtonVPN user config/cache data."
     fi
-    if [ "$DRY_RUN" -eq 1 ]; then
-        printf 'CI SUMMARY: would uninstall packages: %s\n' "$UNINSTALL_PACKAGES_DECISION"
-        printf 'CI_JSON: {"would_uninstall_packages":"%s"}\n' "$UNINSTALL_PACKAGES_DECISION"
-        printf 'CI SUMMARY: would purge configs: %s\n' "$PURGE_CONFIG_DECISION"
-        printf 'CI_JSON: {"would_purge_configs":"%s"}\n' "$PURGE_CONFIG_DECISION"
+    if should_emit_ci_json; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            printf 'CI SUMMARY: would uninstall packages: %s\n' "$UNINSTALL_PACKAGES_DECISION"
+            printf 'CI_JSON: {"would_uninstall_packages":"%s"}\n' "$UNINSTALL_PACKAGES_DECISION"
+            printf 'CI SUMMARY: would purge configs: %s\n' "$PURGE_CONFIG_DECISION"
+            printf 'CI_JSON: {"would_purge_configs":"%s"}\n' "$PURGE_CONFIG_DECISION"
+        else
+            printf 'CI SUMMARY: uninstall packages: %s\n' "$UNINSTALL_PACKAGES_DECISION"
+            printf 'CI_JSON: {"uninstall_packages":"%s"}\n' "$UNINSTALL_PACKAGES_DECISION"
+            printf 'CI SUMMARY: purge configs: %s\n' "$PURGE_CONFIG_DECISION"
+            printf 'CI_JSON: {"purge_configs":"%s"}\n' "$PURGE_CONFIG_DECISION"
+        fi
     else
-        printf 'CI SUMMARY: uninstall packages: %s\n' "$UNINSTALL_PACKAGES_DECISION"
-        printf 'CI_JSON: {"uninstall_packages":"%s"}\n' "$UNINSTALL_PACKAGES_DECISION"
-        printf 'CI SUMMARY: purge configs: %s\n' "$PURGE_CONFIG_DECISION"
-        printf 'CI_JSON: {"purge_configs":"%s"}\n' "$PURGE_CONFIG_DECISION"
+        if [ "$DRY_RUN" -eq 1 ]; then
+            printf 'Summary: would uninstall packages: %s\n' "$UNINSTALL_PACKAGES_DECISION"
+            printf 'Summary: would purge configs: %s\n' "$PURGE_CONFIG_DECISION"
+        else
+            printf 'Summary: uninstall packages: %s\n' "$UNINSTALL_PACKAGES_DECISION"
+            printf 'Summary: purge configs: %s\n' "$PURGE_CONFIG_DECISION"
+        fi
     fi
     DRY_RUN_JSON="$(json_bool "$DRY_RUN")"
     NON_INTERACTIVE_JSON="$(json_bool "$NON_INTERACTIVE")"
@@ -1190,7 +1253,9 @@ run_uninstall_flow() {
     FORCE_DISABLE_KILL_SWITCH_JSON="$(json_bool "$FORCE_DISABLE_KILL_SWITCH")"
     KILL_SWITCH_WAS_ENABLED_JSON="$(json_bool "$KILL_SWITCH_WAS_ENABLED")"
     KILL_SWITCH_DISABLED_JSON="$(json_bool "$KILL_SWITCH_DISABLED_FOR_UNINSTALL")"
-    printf 'CI_JSON: {"action":"%s","dry_run":%s,"non_interactive":%s,"assume_yes":%s,"force_disable_kill_switch":%s,"uninstall_packages_decision":"%s","kill_switch_was_enabled":%s,"kill_switch_disabled_for_uninstall":%s}\n' "$ACTION" "$DRY_RUN_JSON" "$NON_INTERACTIVE_JSON" "$ASSUME_YES_JSON" "$FORCE_DISABLE_KILL_SWITCH_JSON" "$UNINSTALL_PACKAGES_DECISION" "$KILL_SWITCH_WAS_ENABLED_JSON" "$KILL_SWITCH_DISABLED_JSON"
+    if should_emit_ci_json; then
+        printf 'CI_JSON: {"action":"%s","dry_run":%s,"non_interactive":%s,"assume_yes":%s,"force_disable_kill_switch":%s,"uninstall_packages_decision":"%s","kill_switch_was_enabled":%s,"kill_switch_disabled_for_uninstall":%s}\n' "$ACTION" "$DRY_RUN_JSON" "$NON_INTERACTIVE_JSON" "$ASSUME_YES_JSON" "$FORCE_DISABLE_KILL_SWITCH_JSON" "$UNINSTALL_PACKAGES_DECISION" "$KILL_SWITCH_WAS_ENABLED_JSON" "$KILL_SWITCH_DISABLED_JSON"
+    fi
 
     printf 'Done. ProtonVPN uninstall flow completed.\n'
     return 0
