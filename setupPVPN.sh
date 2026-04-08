@@ -22,6 +22,7 @@ UNIT="$SYSTEMD_USER_DIR/protonvpn-autoconnect.service"
 DESKTOP_ENTRY="$AUTOSTART_DIR/protonvpn-autoconnect.desktop"
 STATE_LOG_DIR="$HOME/.local/state"
 LOG_FILE="$STATE_LOG_DIR/proton-helper.log"
+FAILURE_STATE_FILE="$STATE_LOG_DIR/proton-helper-last-failure.json"
 APT_REPO_DEB_URL="https://repo.protonvpn.com/debian/dists/stable/main/binary-all/protonvpn-stable-release_1.0.8_all.deb"
 STARTUP_MODE="none"
 SCRIPT_PATH="$0"
@@ -30,6 +31,12 @@ CONNECT_MODE="default"
 CONNECT_COUNTRY=""
 CONNECT_RETRY_COUNT="1"
 CONNECT_RETRY_DELAY="5"
+SYSTEMD_HEALTH_RETRIES="3"
+SYSTEMD_HEALTH_DELAY="2"
+SYSTEMD_HEALTH_BACKOFF="fixed"
+SYSTEMD_HEALTH_JITTER_MAX="0"
+SYSTEMD_FALLBACK_MODE="auto"
+SYSTEMD_UNIT_HARDENING="off"
 SPLIT_TUNNEL_EXCLUDE_IPS=""
 SPLIT_TUNNEL_EXCLUDE_CIDRS=""
 SANITY_ONLY=0
@@ -42,6 +49,7 @@ UNINSTALL_PACKAGES_DECISION="no"
 PURGE_CONFIG_DECISION="no"
 KILL_SWITCH_WAS_ENABLED=0
 KILL_SWITCH_DISABLED_FOR_UNINSTALL=0
+STARTUP_FAILURE_REASON=""
 SCRIPT_RESULT=0
 PARSE_RESULT=0
 
@@ -87,11 +95,116 @@ json_bool() {
         printf 'false'
     fi
 }
+clear_startup_failure_state() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "[dry-run] would clear startup failure state: $FAILURE_STATE_FILE"
+        return 0
+    fi
+    safe_remove_path "$FAILURE_STATE_FILE" || true
+    return 0
+}
+
+record_startup_failure_state() {
+    failure_reason="$1"
+    STARTUP_FAILURE_REASON="$failure_reason"
+    failure_timestamp="$(log_timestamp)"
+    failure_reason_escaped="$(json_escape "$failure_reason")"
+    failure_action_escaped="$(json_escape "$ACTION")"
+    failure_mode_escaped="$(json_escape "$STARTUP_MODE")"
+    failure_fallback_mode_escaped="$(json_escape "$SYSTEMD_FALLBACK_MODE")"
+    failure_hardening_escaped="$(json_escape "$SYSTEMD_UNIT_HARDENING")"
+    failure_payload="$(printf '{\"timestamp\":\"%s\",\"action\":\"%s\",\"startup_mode\":\"%s\",\"fallback_mode\":\"%s\",\"systemd_unit_hardening\":\"%s\",\"reason\":\"%s\"}\n' "$failure_timestamp" "$failure_action_escaped" "$failure_mode_escaped" "$failure_fallback_mode_escaped" "$failure_hardening_escaped" "$failure_reason_escaped")"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "[dry-run] would write startup failure state: $FAILURE_STATE_FILE"
+        return 0
+    fi
+    mkdir -p "$STATE_LOG_DIR" 2>/dev/null || true
+    printf '%s' "$failure_payload" > "$FAILURE_STATE_FILE" 2>/dev/null || true
+    return 0
+}
+
+is_valid_ipv4() {
+    ipv4_candidate="$1"
+    if ! printf '%s' "$ipv4_candidate" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+        return 1
+    fi
+
+    OLD_IFS_IPV4="$IFS"
+    IFS='.'
+    # shellcheck disable=SC2086
+    set -- $ipv4_candidate
+    IFS="$OLD_IFS_IPV4"
+    if [ "$#" -ne 4 ]; then
+        return 1
+    fi
+
+    for octet in "$1" "$2" "$3" "$4"; do
+        case "$octet" in
+            ''|*[!0-9]*)
+                return 1
+                ;;
+        esac
+        if [ "$octet" -gt 255 ]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+calculate_retry_backoff_delay() {
+    base_delay="$1"
+    attempt_number="$2"
+    backoff_mode="$3"
+
+    case "$backoff_mode" in
+        exponential)
+            computed_delay="$base_delay"
+            retry_index=1
+            while [ "$retry_index" -lt "$attempt_number" ]; do
+                computed_delay=$((computed_delay * 2))
+                retry_index=$((retry_index + 1))
+            done
+            printf '%s' "$computed_delay"
+            return 0
+            ;;
+        *)
+            printf '%s' "$base_delay"
+            return 0
+            ;;
+    esac
+}
+
+calculate_retry_jitter() {
+    jitter_max="$1"
+    if [ "$jitter_max" -eq 0 ]; then
+        printf '0'
+        return 0
+    fi
+
+    if have_cmd od; then
+        random_seed="$(od -An -N2 -tu2 /dev/urandom 2>/dev/null | tr -d '[:space:]' || true)"
+    else
+        random_seed=""
+    fi
+    if [ -z "$random_seed" ]; then
+        random_seed="$(date +%S 2>/dev/null || printf '0')"
+    fi
+    case "$random_seed" in
+        ''|*[!0-9]*)
+            random_seed=0
+            ;;
+    esac
+    printf '%s' $((random_seed % (jitter_max + 1)))
+    return 0
+}
 should_emit_ci_json() {
     if [ "$NON_INTERACTIVE" -eq 1 ] || [ "$FORCE_CI_JSON" -eq 1 ]; then
         return 0
     fi
     return 1
+}
+emit_exit_ci_json() {
+    printf 'CI_JSON: {"action":"%s","success":%s,"dry_run":%s,"non_interactive":%s,"assume_yes":%s,"force_disable_kill_switch":%s,"connect_mode":"%s","connect_country":"%s","connect_retry_count":"%s","connect_retry_delay":"%s","systemd_health_retries":"%s","systemd_health_delay":"%s","systemd_health_backoff":"%s","systemd_health_jitter_max":"%s","systemd_fallback_mode":"%s","systemd_unit_hardening":"%s","split_tunnel_exclude_ips":"%s","split_tunnel_exclude_cidrs":"%s","uninstall_packages_decision":"%s","purge_config_decision":"%s","kill_switch_was_enabled":%s,"kill_switch_disabled_for_uninstall":%s}\n' "$ACTION" "$SUCCESS_JSON" "$DRY_RUN_JSON" "$NON_INTERACTIVE_JSON" "$ASSUME_YES_JSON" "$FORCE_DISABLE_KILL_SWITCH_JSON" "$CONNECT_MODE" "$CONNECT_COUNTRY" "$CONNECT_RETRY_COUNT" "$CONNECT_RETRY_DELAY" "$SYSTEMD_HEALTH_RETRIES" "$SYSTEMD_HEALTH_DELAY" "$SYSTEMD_HEALTH_BACKOFF" "$SYSTEMD_HEALTH_JITTER_MAX" "$SYSTEMD_FALLBACK_MODE" "$SYSTEMD_UNIT_HARDENING" "$SPLIT_TUNNEL_EXCLUDE_IPS" "$SPLIT_TUNNEL_EXCLUDE_CIDRS" "$UNINSTALL_PACKAGES_DECISION" "$PURGE_CONFIG_DECISION" "$KILL_SWITCH_WAS_ENABLED_JSON" "$KILL_SWITCH_DISABLED_JSON"
 }
 exit_handler() {
     DRY_RUN_JSON="$(json_bool "$DRY_RUN")"
@@ -108,7 +221,7 @@ exit_handler() {
         SUCCESS_WORD='failed'
     fi
     if should_emit_ci_json; then
-        printf 'CI_JSON: {"action":"%s","success":%s,"dry_run":%s,"non_interactive":%s,"assume_yes":%s,"force_disable_kill_switch":%s,"connect_mode":"%s","connect_country":"%s","connect_retry_count":"%s","connect_retry_delay":"%s","split_tunnel_exclude_ips":"%s","split_tunnel_exclude_cidrs":"%s","uninstall_packages_decision":"%s","purge_config_decision":"%s","kill_switch_was_enabled":%s,"kill_switch_disabled_for_uninstall":%s}\n' "$ACTION" "$SUCCESS_JSON" "$DRY_RUN_JSON" "$NON_INTERACTIVE_JSON" "$ASSUME_YES_JSON" "$FORCE_DISABLE_KILL_SWITCH_JSON" "$CONNECT_MODE" "$CONNECT_COUNTRY" "$CONNECT_RETRY_COUNT" "$CONNECT_RETRY_DELAY" "$SPLIT_TUNNEL_EXCLUDE_IPS" "$SPLIT_TUNNEL_EXCLUDE_CIDRS" "$UNINSTALL_PACKAGES_DECISION" "$PURGE_CONFIG_DECISION" "$KILL_SWITCH_WAS_ENABLED_JSON" "$KILL_SWITCH_DISABLED_JSON"
+        emit_exit_ci_json
     else
         printf 'Run summary: action=%s result=%s mode=%s\n' "$ACTION" "$SUCCESS_WORD" "interactive"
     fi
@@ -388,13 +501,68 @@ validate_connect_preferences() {
 
     return 0
 }
+validate_systemd_health_preferences() {
+    case "$SYSTEMD_HEALTH_RETRIES" in
+        ''|*[!0-9]*)
+            error "Invalid --systemd-health-retries value: $SYSTEMD_HEALTH_RETRIES (expected integer >= 1)."
+            return 1
+            ;;
+        0)
+            error "Invalid --systemd-health-retries value: $SYSTEMD_HEALTH_RETRIES (expected integer >= 1)."
+            return 1
+            ;;
+    esac
+
+    case "$SYSTEMD_HEALTH_DELAY" in
+        ''|*[!0-9]*)
+            error "Invalid --systemd-health-delay value: $SYSTEMD_HEALTH_DELAY (expected integer >= 0)."
+            return 1
+            ;;
+    esac
+
+    case "$SYSTEMD_HEALTH_BACKOFF" in
+        fixed|exponential)
+            ;;
+        *)
+            error "Invalid --systemd-health-backoff value: $SYSTEMD_HEALTH_BACKOFF (expected fixed|exponential)."
+            return 1
+            ;;
+    esac
+
+    case "$SYSTEMD_HEALTH_JITTER_MAX" in
+        ''|*[!0-9]*)
+            error "Invalid --systemd-health-jitter value: $SYSTEMD_HEALTH_JITTER_MAX (expected integer >= 0)."
+            return 1
+            ;;
+    esac
+
+    case "$SYSTEMD_FALLBACK_MODE" in
+        auto|xdg-only|systemd-only)
+            ;;
+        *)
+            error "Invalid --systemd-fallback-mode value: $SYSTEMD_FALLBACK_MODE (expected auto|xdg-only|systemd-only)."
+            return 1
+            ;;
+    esac
+
+    case "$SYSTEMD_UNIT_HARDENING" in
+        off|basic)
+            ;;
+        *)
+            error "Invalid --systemd-unit-hardening value: $SYSTEMD_UNIT_HARDENING (expected off|basic)."
+            return 1
+            ;;
+    esac
+
+    return 0
+}
 validate_split_tunnel_preferences() {
     OLD_IFS="$IFS"
 
     if [ -n "$SPLIT_TUNNEL_EXCLUDE_IPS" ]; then
         IFS=','
         for exclude_ip in $SPLIT_TUNNEL_EXCLUDE_IPS; do
-            if ! printf '%s' "$exclude_ip" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+            if ! is_valid_ipv4 "$exclude_ip"; then
                 IFS="$OLD_IFS"
                 error "Invalid --exclude-ip value: $exclude_ip"
                 return 1
@@ -407,6 +575,12 @@ validate_split_tunnel_preferences() {
         IFS=','
         for exclude_cidr in $SPLIT_TUNNEL_EXCLUDE_CIDRS; do
             if ! printf '%s' "$exclude_cidr" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$'; then
+                IFS="$OLD_IFS"
+                error "Invalid --exclude-cidr value: $exclude_cidr"
+                return 1
+            fi
+            cidr_ip="$(printf '%s' "$exclude_cidr" | cut -d/ -f1)"
+            if ! is_valid_ipv4 "$cidr_ip"; then
                 IFS="$OLD_IFS"
                 error "Invalid --exclude-cidr value: $exclude_cidr"
                 return 1
@@ -431,6 +605,16 @@ run_status_flow() {
     STATUS_IP="unknown"
     STATUS_PUBLIC_IP="unknown"
     STATUS_KILL_SWITCH_ENABLED=0
+    STATUS_SYSTEMD_HEALTH_RETRIES="$SYSTEMD_HEALTH_RETRIES"
+    STATUS_SYSTEMD_HEALTH_DELAY="$SYSTEMD_HEALTH_DELAY"
+    STATUS_SYSTEMD_HEALTH_BACKOFF="$SYSTEMD_HEALTH_BACKOFF"
+    STATUS_SYSTEMD_HEALTH_JITTER_MAX="$SYSTEMD_HEALTH_JITTER_MAX"
+    STATUS_SYSTEMD_FALLBACK_MODE="$SYSTEMD_FALLBACK_MODE"
+    STATUS_SYSTEMD_UNIT_HARDENING="$SYSTEMD_UNIT_HARDENING"
+    STATUS_LAST_FAILURE_PRESENT=0
+    if [ -f "$FAILURE_STATE_FILE" ]; then
+        STATUS_LAST_FAILURE_PRESENT=1
+    fi
 
     if is_user_systemd_available; then
         if systemctl --user --quiet is-active protonvpn-autoconnect.service 2>/dev/null; then
@@ -484,12 +668,19 @@ run_status_flow() {
 
     if [ "$NON_INTERACTIVE" -eq 1 ]; then
         STATUS_KS_JSON="$(json_bool "$STATUS_KILL_SWITCH_ENABLED")"
+        STATUS_FAILURE_PRESENT_JSON="$(json_bool "$STATUS_LAST_FAILURE_PRESENT")"
         STATUS_SERVICE_ESCAPED="$(json_escape "$STATUS_SERVICE_STATE")"
         STATUS_VPN_ESCAPED="$(json_escape "$STATUS_VPN_STATE")"
         STATUS_SERVER_ESCAPED="$(json_escape "$STATUS_SERVER")"
         STATUS_IP_ESCAPED="$(json_escape "$STATUS_IP")"
         STATUS_PUBLIC_IP_ESCAPED="$(json_escape "$STATUS_PUBLIC_IP")"
-        printf 'STATUS_JSON: {"service_state":"%s","vpn_state":"%s","server":"%s","vpn_ip":"%s","public_ip":"%s","kill_switch_enabled":%s}\n' "$STATUS_SERVICE_ESCAPED" "$STATUS_VPN_ESCAPED" "$STATUS_SERVER_ESCAPED" "$STATUS_IP_ESCAPED" "$STATUS_PUBLIC_IP_ESCAPED" "$STATUS_KS_JSON"
+        STATUS_HEALTH_RETRIES_ESCAPED="$(json_escape "$STATUS_SYSTEMD_HEALTH_RETRIES")"
+        STATUS_HEALTH_DELAY_ESCAPED="$(json_escape "$STATUS_SYSTEMD_HEALTH_DELAY")"
+        STATUS_BACKOFF_ESCAPED="$(json_escape "$STATUS_SYSTEMD_HEALTH_BACKOFF")"
+        STATUS_JITTER_ESCAPED="$(json_escape "$STATUS_SYSTEMD_HEALTH_JITTER_MAX")"
+        STATUS_FALLBACK_ESCAPED="$(json_escape "$STATUS_SYSTEMD_FALLBACK_MODE")"
+        STATUS_HARDENING_ESCAPED="$(json_escape "$STATUS_SYSTEMD_UNIT_HARDENING")"
+        printf 'STATUS_JSON: {\"service_state\":\"%s\",\"vpn_state\":\"%s\",\"server\":\"%s\",\"vpn_ip\":\"%s\",\"public_ip\":\"%s\",\"kill_switch_enabled\":%s,\"systemd_health_retries\":\"%s\",\"systemd_health_delay\":\"%s\",\"systemd_health_backoff\":\"%s\",\"systemd_health_jitter_max\":\"%s\",\"systemd_fallback_mode\":\"%s\",\"systemd_unit_hardening\":\"%s\",\"last_startup_failure_present\":%s}\\n' "$STATUS_SERVICE_ESCAPED" "$STATUS_VPN_ESCAPED" "$STATUS_SERVER_ESCAPED" "$STATUS_IP_ESCAPED" "$STATUS_PUBLIC_IP_ESCAPED" "$STATUS_KS_JSON" "$STATUS_HEALTH_RETRIES_ESCAPED" "$STATUS_HEALTH_DELAY_ESCAPED" "$STATUS_BACKOFF_ESCAPED" "$STATUS_JITTER_ESCAPED" "$STATUS_FALLBACK_ESCAPED" "$STATUS_HARDENING_ESCAPED" "$STATUS_FAILURE_PRESENT_JSON"
     else
         printf 'Status dashboard\n'
         printf '%s\n' "- startup service: $STATUS_SERVICE_STATE"
@@ -497,6 +688,17 @@ run_status_flow() {
         printf '%s\n' "- server: $STATUS_SERVER"
         printf '%s\n' "- vpn ip: $STATUS_IP"
         printf '%s\n' "- public ip: $STATUS_PUBLIC_IP"
+        printf '%s\\n' "- health retries: $STATUS_SYSTEMD_HEALTH_RETRIES"
+        printf '%s\\n' "- health delay: ${STATUS_SYSTEMD_HEALTH_DELAY}s"
+        printf '%s\\n' "- health backoff: $STATUS_SYSTEMD_HEALTH_BACKOFF"
+        printf '%s\\n' "- health jitter max: ${STATUS_SYSTEMD_HEALTH_JITTER_MAX}s"
+        printf '%s\\n' "- fallback mode: $STATUS_SYSTEMD_FALLBACK_MODE"
+        printf '%s\\n' "- systemd hardening: $STATUS_SYSTEMD_UNIT_HARDENING"
+        if [ "$STATUS_LAST_FAILURE_PRESENT" -eq 1 ]; then
+            printf '%s\\n' "- last startup failure state: present ($FAILURE_STATE_FILE)"
+        else
+            printf '%s\\n' "- last startup failure state: none"
+        fi
         if [ "$STATUS_KILL_SWITCH_ENABLED" -eq 1 ]; then
             printf '%s\n' '- kill switch: enabled'
         else
@@ -508,7 +710,7 @@ run_status_flow() {
 }
 
 print_usage() {
-    printf 'Usage: %s [--non-interactive <install|repair|status|uninstall|quit|sanity-check>] [--status] [--sanity-check] [--ci-json] [--connect-mode <default|fastest|country>] [--country-code <CC>] [--connect-retry <N>] [--connect-retry-delay <seconds>] [--exclude-ip <IPv4>] [--exclude-cidr <CIDR>] [--dry-run] [--yes] [--force-disable-kill-switch] [--help]\n' "$SCRIPT_PATH"
+    printf 'Usage: %s [--non-interactive <install|repair|status|uninstall|quit|sanity-check>] [--status] [--sanity-check] [--ci-json] [--connect-mode <default|fastest|country>] [--country-code <CC>] [--connect-retry <N>] [--connect-retry-delay <seconds>] [--systemd-health-retries <N>] [--systemd-health-delay <seconds>] [--systemd-health-backoff <fixed|exponential>] [--systemd-health-jitter <seconds>] [--systemd-fallback-mode <auto|xdg-only|systemd-only>] [--systemd-unit-hardening <off|basic>] [--exclude-ip <IPv4>] [--exclude-cidr <CIDR>] [--dry-run] [--yes] [--force-disable-kill-switch] [--help]\\n' "$SCRIPT_PATH"
 }
 
 parse_cli_args() {
@@ -591,6 +793,54 @@ parse_cli_args() {
                 fi
                 CONNECT_RETRY_DELAY="$1"
                 ;;
+            --systemd-health-retries)
+                shift
+                if [ "$#" -eq 0 ]; then
+                    error "Missing value for --systemd-health-retries. Use integer >= 1."
+                    return 1
+                fi
+                SYSTEMD_HEALTH_RETRIES="$1"
+                ;;
+            --systemd-health-delay)
+                shift
+                if [ "$#" -eq 0 ]; then
+                    error "Missing value for --systemd-health-delay. Use integer >= 0."
+                    return 1
+                fi
+                SYSTEMD_HEALTH_DELAY="$1"
+                ;;
+            --systemd-health-backoff)
+                shift
+                if [ "$#" -eq 0 ]; then
+                    error "Missing value for --systemd-health-backoff. Use fixed|exponential."
+                    return 1
+                fi
+                SYSTEMD_HEALTH_BACKOFF="$1"
+                ;;
+            --systemd-health-jitter)
+                shift
+                if [ "$#" -eq 0 ]; then
+                    error "Missing value for --systemd-health-jitter. Use integer >= 0."
+                    return 1
+                fi
+                SYSTEMD_HEALTH_JITTER_MAX="$1"
+                ;;
+            --systemd-fallback-mode)
+                shift
+                if [ "$#" -eq 0 ]; then
+                    error "Missing value for --systemd-fallback-mode. Use auto|xdg-only|systemd-only."
+                    return 1
+                fi
+                SYSTEMD_FALLBACK_MODE="$1"
+                ;;
+            --systemd-unit-hardening)
+                shift
+                if [ "$#" -eq 0 ]; then
+                    error "Missing value for --systemd-unit-hardening. Use off|basic."
+                    return 1
+                fi
+                SYSTEMD_UNIT_HARDENING="$1"
+                ;;
             --exclude-ip)
                 shift
                 if [ "$#" -eq 0 ]; then
@@ -636,6 +886,48 @@ is_user_systemd_available() {
     fi
 
     return 0
+}
+verify_user_systemd_unit_health() {
+    health_unit="${1:-protonvpn-autoconnect.service}"
+    health_retries="${2:-$SYSTEMD_HEALTH_RETRIES}"
+    health_delay="${3:-$SYSTEMD_HEALTH_DELAY}"
+    health_attempt=1
+
+    while [ "$health_attempt" -le "$health_retries" ]; do
+        if systemctl --user --quiet is-active "$health_unit" 2>/dev/null; then
+            return 0
+        fi
+
+        if systemctl --user --quiet is-failed "$health_unit" 2>/dev/null; then
+            STARTUP_FAILURE_REASON="systemd --user unit $health_unit is in failed state."
+            warn "systemd --user unit $health_unit is in failed state."
+            return 1
+        fi
+
+        health_active_state="$(systemctl --user show "$health_unit" --property=ActiveState --value 2>/dev/null || true)"
+        health_sub_state="$(systemctl --user show "$health_unit" --property=SubState --value 2>/dev/null || true)"
+        health_result_state="$(systemctl --user show "$health_unit" --property=Result --value 2>/dev/null || true)"
+
+        if [ "$health_active_state" = "active" ] && [ "$health_sub_state" = "exited" ]; then
+            return 0
+        fi
+
+        if [ "$health_attempt" -lt "$health_retries" ]; then
+            retry_delay_with_backoff="$(calculate_retry_backoff_delay "$health_delay" "$health_attempt" "$SYSTEMD_HEALTH_BACKOFF")"
+            retry_jitter_delay="$(calculate_retry_jitter "$SYSTEMD_HEALTH_JITTER_MAX")"
+            retry_total_delay=$((retry_delay_with_backoff + retry_jitter_delay))
+            warn "systemd --user unit $health_unit not healthy yet (active=$health_active_state sub=$health_sub_state result=$health_result_state); retrying in ${retry_total_delay}s (base=${retry_delay_with_backoff}s jitter=${retry_jitter_delay}s)."
+            sleep "$retry_total_delay"
+        fi
+        health_attempt=$((health_attempt + 1))
+    done
+
+    health_active_state="$(systemctl --user show "$health_unit" --property=ActiveState --value 2>/dev/null || true)"
+    health_sub_state="$(systemctl --user show "$health_unit" --property=SubState --value 2>/dev/null || true)"
+    health_result_state="$(systemctl --user show "$health_unit" --property=Result --value 2>/dev/null || true)"
+    STARTUP_FAILURE_REASON="systemd --user unit $health_unit remained unhealthy after $health_retries checks (active=$health_active_state sub=$health_sub_state result=$health_result_state)."
+    warn "systemd --user unit $health_unit remained unhealthy after $health_retries checks (active=$health_active_state sub=$health_sub_state result=$health_result_state)."
+    return 1
 }
 
 detect_pkg_manager() {
@@ -845,6 +1137,21 @@ if ! command -v protonvpn >/dev/null 2>&1; then
     printf 'protonvpn command not found.\n' >&2
     exit 1
 fi
+LOCK_FILE="\$HOME/.local/state/proton-helper-autoconnect.lock"
+LOCK_DIR="\$HOME/.local/state"
+mkdir -p "\$LOCK_DIR" >/dev/null 2>&1 || true
+if [ -f "\$LOCK_FILE" ]; then
+    lock_pid="$(cat "\$LOCK_FILE" 2>/dev/null || true)"
+    if [ -n "\$lock_pid" ] && kill -0 "\$lock_pid" >/dev/null 2>&1; then
+        printf 'Another ProtonVPN autoconnect instance is already running (pid=%s).\\n' "\$lock_pid"
+        exit 0
+    fi
+fi
+printf '%s\\n' "\$\$" > "\$LOCK_FILE" 2>/dev/null || true
+cleanup_lock() {
+    rm -f "\$LOCK_FILE"
+}
+trap cleanup_lock EXIT INT TERM
 # Wait for real network connectivity before trying VPN connection.
 printf 'Waiting for network connectivity...\n'
 network_up=0
@@ -935,6 +1242,7 @@ EOF
 
 setup_user_systemd() {
     if ! is_user_systemd_available; then
+        STARTUP_FAILURE_REASON="systemd --user environment is not available."
         return 1
     fi
 
@@ -942,6 +1250,14 @@ setup_user_systemd() {
         log "[dry-run] would write and enable managed user unit $UNIT"
         STARTUP_MODE="systemd"
         return 0
+    fi
+
+    SYSTEMD_HARDENING_DIRECTIVES=""
+    if [ "$SYSTEMD_UNIT_HARDENING" = "basic" ]; then
+        SYSTEMD_HARDENING_DIRECTIVES='NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes'
     fi
 
     write_file_if_changed "$UNIT" << EOF
@@ -962,13 +1278,35 @@ Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+$SYSTEMD_HARDENING_DIRECTIVES
 
 [Install]
 WantedBy=default.target
 EOF
-    systemctl --user daemon-reload
-    systemctl --user enable --now protonvpn-autoconnect.service
+    if ! systemctl --user daemon-reload; then
+        STARTUP_FAILURE_REASON="systemd --user daemon-reload failed."
+        warn "systemd --user daemon-reload failed."
+        return 1
+    fi
+    if ! systemctl --user enable protonvpn-autoconnect.service >/dev/null 2>&1; then
+        STARTUP_FAILURE_REASON="systemd --user enable failed for protonvpn-autoconnect.service."
+        warn "systemd --user enable failed for protonvpn-autoconnect.service."
+        return 1
+    fi
+    if ! systemctl --user start protonvpn-autoconnect.service >/dev/null 2>&1; then
+        STARTUP_FAILURE_REASON="systemd --user start failed for protonvpn-autoconnect.service."
+        warn "systemd --user start failed for protonvpn-autoconnect.service."
+        return 1
+    fi
+    if ! verify_user_systemd_unit_health protonvpn-autoconnect.service "$SYSTEMD_HEALTH_RETRIES" "$SYSTEMD_HEALTH_DELAY"; then
+        if [ -z "$STARTUP_FAILURE_REASON" ]; then
+            STARTUP_FAILURE_REASON="systemd --user startup health check failed for protonvpn-autoconnect.service."
+        fi
+        warn "systemd --user startup health check failed for protonvpn-autoconnect.service."
+        return 1
+    fi
     STARTUP_MODE="systemd"
+    return 0
 }
 
 setup_xdg_autostart() {
@@ -1166,6 +1504,7 @@ ensure_self_executable() {
 run_install_flow() {
     run_command_sanity_check || return 1
     validate_connect_preferences || return 1
+    validate_systemd_health_preferences || return 1
     validate_split_tunnel_preferences || return 1
     if ! install_protonvpn_cli; then
         error "Setup stopped because ProtonVPN CLI could not be installed."
@@ -1174,18 +1513,48 @@ run_install_flow() {
 
     write_wrapper
 
-    if setup_user_systemd; then
-        log "Configured user systemd autostart."
-    else
-        setup_xdg_autostart
-        warn "systemd --user not available; used XDG autostart fallback."
-    fi
+    STARTUP_FAILURE_REASON=""
+    case "$SYSTEMD_FALLBACK_MODE" in
+        xdg-only)
+            disable_user_systemd_unit || true
+            if ! setup_xdg_autostart; then
+                record_startup_failure_state "xdg-only fallback mode failed to configure XDG autostart."
+                return 1
+            fi
+            log "Configured XDG autostart (systemd fallback mode: xdg-only)."
+            clear_startup_failure_state
+            ;;
+        systemd-only)
+            if setup_user_systemd; then
+                log "Configured user systemd autostart."
+                clear_startup_failure_state
+            else
+                failure_reason="${STARTUP_FAILURE_REASON:-systemd startup setup failed in systemd-only mode.}"
+                record_startup_failure_state "$failure_reason"
+                error "systemd-only mode is enabled and systemd startup failed; aborting without XDG fallback."
+                return 1
+            fi
+            ;;
+        *)
+            if setup_user_systemd; then
+                log "Configured user systemd autostart."
+                clear_startup_failure_state
+            else
+                failure_reason="${STARTUP_FAILURE_REASON:-systemd startup setup failed or unhealthy.}"
+                record_startup_failure_state "$failure_reason"
+                disable_user_systemd_unit || true
+                setup_xdg_autostart || return 1
+                warn "systemd --user startup setup failed or unhealthy; used XDG autostart fallback."
+            fi
+            ;;
+    esac
     if [ "$CONNECT_MODE" = "country" ]; then
         log "Autoconnect mode configured: country ($CONNECT_COUNTRY)."
     else
         log "Autoconnect mode configured: $CONNECT_MODE."
     fi
     log "Autoconnect retry configured: attempts=$CONNECT_RETRY_COUNT delay=${CONNECT_RETRY_DELAY}s."
+    log "Systemd health-check configured: retries=$SYSTEMD_HEALTH_RETRIES delay=${SYSTEMD_HEALTH_DELAY}s backoff=$SYSTEMD_HEALTH_BACKOFF jitter=${SYSTEMD_HEALTH_JITTER_MAX}s fallback_mode=$SYSTEMD_FALLBACK_MODE unit_hardening=$SYSTEMD_UNIT_HARDENING."
     if [ -n "$SPLIT_TUNNEL_EXCLUDE_IPS" ] || [ -n "$SPLIT_TUNNEL_EXCLUDE_CIDRS" ]; then
         log "Split tunneling exclusions configured: ips=${SPLIT_TUNNEL_EXCLUDE_IPS:-none} cidrs=${SPLIT_TUNNEL_EXCLUDE_CIDRS:-none}."
     fi

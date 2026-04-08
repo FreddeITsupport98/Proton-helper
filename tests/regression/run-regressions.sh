@@ -21,6 +21,22 @@ if ! "$REG_DIR/test-setupPVPN.sh"; then
     add_fail "test-setupPVPN.sh"
 fi
 
+if ! "$REG_DIR/test-systemd-health-fallback.sh"; then
+    add_fail "test-systemd-health-fallback.sh"
+fi
+
+if ! "$REG_DIR/test-cli-parser.sh"; then
+    add_fail "test-cli-parser.sh"
+fi
+
+if ! "$REG_DIR/test-wrapper-lockfile.sh"; then
+    add_fail "test-wrapper-lockfile.sh"
+fi
+
+if ! "$REG_DIR/test-wrapper-generated-lockfile.sh"; then
+    add_fail "test-wrapper-generated-lockfile.sh"
+fi
+
 if [ "$FAIL_COUNT" -gt 0 ]; then
     printf 'FAIL SUMMARY (%s)\n' "$FAIL_COUNT"
     printf '%b\n' "$FAIL_LIST"

@@ -1,5 +1,13 @@
 # Changelog
 ## Unreleased
+- 2026-04-08 21:13 UTC: Added optional `WRAPPER_FIXTURE_DEBUG=1` mode for `tests/regression/test-wrapper-generated-lockfile.sh` to dump generated wrapper + fixture install output on assertion failures.
+- 2026-04-08 21:08 UTC: Added generated-wrapper fixture regression `tests/regression/test-wrapper-generated-lockfile.sh` to verify lockfile guard lines in the emitted wrapper via safe mocked install flow.
+- 2026-04-08 21:00 UTC: Refactored global `EXIT` telemetry formatting into helper `emit_exit_ci_json` to simplify maintenance while preserving existing CI output keys.
+- 2026-04-08 21:00 UTC: Added focused lockfile regression script `tests/regression/test-wrapper-lockfile.sh` and integrated it into `tests/regression/run-regressions.sh`.
+- 2026-04-08 20:41 UTC: Added startup policy controls (`--systemd-fallback-mode`, `--systemd-unit-hardening`) plus systemd health strategy controls (`--systemd-health-backoff`, `--systemd-health-jitter`) and expanded global telemetry/status fields for these settings.
+- 2026-04-08 20:41 UTC: Added structured startup failure state output (`~/.local/state/proton-helper-last-failure.json`), wrapper lockfile concurrency protection, stricter IPv4/CIDR validation, and parser regression coverage for invalid/missing startup policy arguments.
+- 2026-04-08 20:32 UTC: Added `--systemd-health-retries` and `--systemd-health-delay` install-time controls plus deterministic mocked regression coverage for `systemd --user` failed/inactive/unhealthy fallback transitions.
+- 2026-04-08 20:20 UTC: Hardened `systemd --user` autostart by adding post-start unit health verification with bounded retries and automatic fallback to XDG autostart when systemd startup fails or remains unhealthy.
 - 2026-04-07 20:12 UTC: Improved `setupPVPN.sh` to support multiple Linux package managers and both `systemd --user` plus XDG autostart setup paths.
 - 2026-04-07 20:17 UTC: Added self auto-chmod logic in `setupPVPN.sh` to keep the setup script executable.
 - 2026-04-07 20:19 UTC: Added a menu-driven installer flow in `setupPVPN.sh` to select install or uninstall before execution.
